@@ -3,8 +3,14 @@ import asyncio
 
 import pytest
 
+from unittest.mock import AsyncMock, patch
+
 from src.customer_support.schemas import Ticket
 from src.customer_support.ticket_queue import TicketQueue
+from src.customer_support.ticket_worker import (
+    process_ticket,
+    run_ticket_worker,
+)
 
 
 @pytest.fixture
@@ -95,3 +101,58 @@ def test_queue_blocks_enqueue_when_full(sample_ticket):
         await queue.join()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.asyncio
+async def test_process_ticket_routes_for_review(sample_ticket):
+    with patch(
+        "src.customer_support.ticket_worker.run_agent_graph",
+        new_callable=AsyncMock,
+        return_value={
+            "category": "account",
+            "priority": "critical",
+            "category_confidence": 0.95,
+            "priority_confidence": 0.95,
+            "requires_human_approval": True,
+            "escalation_reason": "Critical priority predicted",
+            "route": "human_review",
+            "knowledge": [],
+        },
+    ):
+        result = await process_ticket(sample_ticket)
+
+    from src.customer_support.schemas import TicketStatus
+
+    assert result.status == TicketStatus.WAITING_FOR_APPROVAL
+    assert result.requires_human_approval is True
+
+
+@pytest.mark.asyncio
+async def test_worker_consumes_queued_ticket(sample_ticket):
+    queue = TicketQueue()
+    await queue.enqueue(sample_ticket)
+
+    stop_event = asyncio.Event()
+
+    with patch(
+        "src.customer_support.ticket_worker.process_ticket",
+        new_callable=AsyncMock,
+    ) as mock_process:
+        worker_task = asyncio.create_task(
+            run_ticket_worker(queue, stop_event)
+        )
+
+        try:
+            for _ in range(40):
+                if mock_process.await_count > 0:
+                    break
+                await asyncio.sleep(0.05)
+        finally:
+            stop_event.set()
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
+
+    mock_process.assert_awaited_once_with(sample_ticket)

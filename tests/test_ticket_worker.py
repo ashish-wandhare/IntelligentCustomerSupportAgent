@@ -1,12 +1,16 @@
 
 import asyncio
-from datetime import datetime, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from src.customer_support import database
-from src.customer_support.database import get_ticket, initialize_database
-from src.customer_support.schemas import Ticket, TicketStatus
+from src.customer_support.schemas import (
+    Ticket,
+    TicketCategory,
+    TicketPriority,
+    TicketStatus,
+)
 from src.customer_support.ticket_queue import TicketQueue
 from src.customer_support.ticket_worker import (
     process_ticket,
@@ -15,79 +19,103 @@ from src.customer_support.ticket_worker import (
 
 
 @pytest.fixture
-def sample_ticket(tmp_path, monkeypatch):
-    """Create an isolated database and a sample ticket."""
-    db_path = tmp_path / "worker_test.db"
-
-    monkeypatch.setattr(
-        database,
-        "get_database_path",
-        lambda: db_path,
-    )
-    initialize_database()
-
-    now = datetime.now(timezone.utc)
-
-    ticket = Ticket(
+def sample_ticket():
+    return Ticket(
         ticket_id="TKT-WORKER-001",
         customer_id="CUST-WORKER-001",
-        subject="Unable to access my account",
-        description=(
-            "I cannot access my account after changing my password."
-        ),
-        created_at=now,
-        updated_at=now,
+        subject="Unable to log in",
+        description="I cannot log in after resetting my password.",
     )
-
-    database.save_ticket(ticket)
-    return ticket
 
 
 @pytest.mark.asyncio
 async def test_process_ticket_routes_for_review(sample_ticket):
-    processed = await process_ticket(sample_ticket)
+    with patch(
+        "src.customer_support.ticket_worker.run_agent_graph",
+        new_callable=AsyncMock,
+        return_value={
+            "category": TicketCategory.ACCOUNT.value,
+            "priority": TicketPriority.CRITICAL.value,
+            "category_confidence": 0.95,
+            "priority_confidence": 0.95,
+            "requires_human_approval": True,
+            "escalation_reason": "Critical priority predicted",
+            "route": "human_review",
+            "knowledge": [],
+        },
+    ):
+        result = await process_ticket(sample_ticket)
 
-    assert processed.status == TicketStatus.WAITING_FOR_APPROVAL
-    assert processed.requires_human_approval is True
-    assert processed.escalation_reason is not None
-
-    assert processed.category_confidence is not None
-    assert 0.0 <= processed.category_confidence <= 1.0
-
-    assert processed.priority_confidence is not None
-    assert 0.0 <= processed.priority_confidence <= 1.0
-
-    assert processed.updated_at >= processed.created_at
-
-    saved = get_ticket(sample_ticket.ticket_id)
-    assert saved is not None
-    assert saved["status"] == TicketStatus.WAITING_FOR_APPROVAL.value
-    assert saved["requires_human_approval"] == 1
+    assert result.status == TicketStatus.WAITING_FOR_APPROVAL
+    assert result.requires_human_approval is True
+    assert result.escalation_reason == "Critical priority predicted"
 
 
 @pytest.mark.asyncio
 async def test_worker_consumes_queued_ticket(sample_ticket):
-    queue = TicketQueue(max_size=10)
-    stop_event = asyncio.Event()
-
+    queue = TicketQueue()
     await queue.enqueue(sample_ticket)
 
-    worker_task = asyncio.create_task(
-        run_ticket_worker(queue, stop_event)
-    )
+    stop_event = asyncio.Event()
 
-    try:
-        await asyncio.wait_for(queue.join(), timeout=5)
-    finally:
-        stop_event.set()
-        await asyncio.wait_for(worker_task, timeout=3)
+    with patch(
+        "src.customer_support.ticket_worker.process_ticket",
+        new_callable=AsyncMock,
+    ) as mock_process:
+        worker_task = asyncio.create_task(
+            run_ticket_worker(queue, stop_event)
+        )
 
-    saved = get_ticket(sample_ticket.ticket_id)
+        try:
+            for _ in range(40):
+                if mock_process.await_count > 0:
+                    break
+                await asyncio.sleep(0.05)
+        finally:
+            stop_event.set()
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
 
-    assert saved is not None
-    assert saved["status"] == TicketStatus.WAITING_FOR_APPROVAL.value
-    assert saved["requires_human_approval"] == 1
-    assert saved["escalation_reason"] is not None
-    assert saved["category_confidence"] is not None
-    assert saved["priority_confidence"] is not None
-    assert queue.is_empty
+    mock_process.assert_awaited_once_with(sample_ticket)
+
+
+@pytest.mark.asyncio
+async def test_approved_ticket_resumes_without_reclassification(
+    sample_ticket,
+):
+    sample_ticket.status = TicketStatus.PROCESSING
+    sample_ticket.category = TicketCategory.ACCOUNT
+    sample_ticket.priority = TicketPriority.HIGH
+    sample_ticket.category_confidence = 0.95
+    sample_ticket.priority_confidence = 0.90
+    sample_ticket.requires_human_approval = False
+    sample_ticket.escalation_reason = None
+
+    database.save_ticket(sample_ticket)
+
+    with patch(
+        "src.customer_support.ticket_worker.run_agent_graph",
+        new_callable=AsyncMock,
+        return_value={
+            "route": "continue_processing",
+            "knowledge": [],
+        },
+    ) as mock_graph:
+        result = await process_ticket(sample_ticket)
+
+    mock_graph.assert_awaited_once()
+
+    graph_state = mock_graph.await_args.args[0]
+
+    assert graph_state["resume_approved"] is True
+    assert graph_state["category"] == TicketCategory.ACCOUNT.value
+    assert graph_state["priority"] == TicketPriority.HIGH.value
+
+    assert result.status == TicketStatus.PROCESSING
+    assert result.priority == TicketPriority.HIGH
+    assert result.category_confidence == 0.95
+    assert result.priority_confidence == 0.90
+    assert result.requires_human_approval is False

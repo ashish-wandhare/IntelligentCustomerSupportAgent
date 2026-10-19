@@ -1,175 +1,102 @@
+
 import asyncio
 import logging
 from datetime import datetime, timezone
 
+from src.customer_support.agent_graph import run_agent_graph
 from src.customer_support.database import save_ticket
-from src.customer_support.models.ticket_classifier import predict_ticket
-from src.customer_support.knowledge_base.ticket_knowledge import (
-    retrieve_ticket_knowledge,
-)
-from src.customer_support.schemas import (
-    Ticket,
-    TicketCategory,
-    TicketPriority,
-    TicketStatus,
-)
+from src.customer_support.schemas import Ticket, TicketStatus
 from src.customer_support.ticket_queue import TicketQueue
 
 logger = logging.getLogger(__name__)
 
-MIN_CONFIDENCE = 0.60
+
+def ticket_has_existing_classification(ticket: Ticket) -> bool:
+    return (
+        ticket.category_confidence is not None
+        and ticket.priority_confidence is not None
+    )
 
 
-async def retrieve_knowledge_for_ticket(ticket: Ticket) -> list[dict]:
-    """Retrieve support passages without blocking the async event loop."""
-    return await asyncio.to_thread(
-        retrieve_ticket_knowledge,
-        ticket.subject,
-        ticket.description,
+def ticket_is_resuming_after_approval(ticket: Ticket) -> bool:
+    return (
+        ticket.status == TicketStatus.PROCESSING
+        and ticket_has_existing_classification(ticket)
+        and not ticket.requires_human_approval
     )
 
 
 async def process_ticket(ticket: Ticket) -> Ticket:
-    """
-    Classify new tickets and retrieve support knowledge when permitted.
+    resuming_approved_ticket = ticket_is_resuming_after_approval(ticket)
 
-    Tickets needing human approval wait for review.
-    Approved tickets resume without repeating ML classification.
-    """
-    # An approved ticket already has classification results.
-    # Retrieve knowledge without repeating classification.
-    if (
-        ticket.status == TicketStatus.PROCESSING
-        and ticket.category_confidence is not None
-        and ticket.priority_confidence is not None
-        and not ticket.requires_human_approval
-    ):
-        try:
-            passages = await retrieve_knowledge_for_ticket(ticket)
-
+    try:
+        if resuming_approved_ticket:
             logger.info(
-                "Retrieved %d knowledge passages for approved ticket %s.",
-                len(passages),
+                "Resuming approved ticket %s without reclassification.",
                 ticket.ticket_id,
             )
-
-            for passage in passages:
-                logger.info(
-                    "Ticket %s knowledge match: source=%s section=%s score=%.3f",
-                    ticket.ticket_id,
-                    passage["source"],
-                    passage["section"],
-                    passage["score"],
-                )
-
+        else:
+            ticket.status = TicketStatus.PROCESSING
             ticket.updated_at = datetime.now(timezone.utc)
             save_ticket(ticket)
 
-        except Exception:
-            logger.exception(
-                "Knowledge retrieval failed for approved ticket %s.",
-                ticket.ticket_id,
+        graph_state = {
+            "ticket_id": ticket.ticket_id,
+            "subject": ticket.subject,
+            "description": ticket.description,
+            "resume_approved": resuming_approved_ticket,
+        }
+
+        if resuming_approved_ticket:
+            graph_state.update(
+                {
+                    "category": ticket.category.value,
+                    "priority": ticket.priority.value,
+                    "category_confidence": ticket.category_confidence,
+                    "priority_confidence": ticket.priority_confidence,
+                    "requires_human_approval": False,
+                    "escalation_reason": None,
+                }
             )
 
+        result = await run_agent_graph(graph_state)
+
+        if not resuming_approved_ticket:
+            from src.customer_support.schemas import (
+                TicketCategory,
+                TicketPriority,
+            )
+
+            ticket.category = TicketCategory(result["category"])
+            ticket.priority = TicketPriority(result["priority"])
+            ticket.category_confidence = result["category_confidence"]
+            ticket.priority_confidence = result["priority_confidence"]
+            ticket.requires_human_approval = result["requires_human_approval"]
+            ticket.escalation_reason = result.get("escalation_reason")
+
+            if ticket.requires_human_approval:
+                ticket.status = TicketStatus.WAITING_FOR_APPROVAL
+                ticket.updated_at = datetime.now(timezone.utc)
+                save_ticket(ticket)
+                logger.info(
+                    "Ticket %s requires human approval.",
+                    ticket.ticket_id,
+                )
+                return ticket
+
+        for passage in result.get("knowledge", []):
+            logger.info(
+                "Knowledge retrieved for ticket %s: %s",
+                ticket.ticket_id,
+                passage,
+            )
+
+        ticket.updated_at = datetime.now(timezone.utc)
+        save_ticket(ticket)
         return ticket
 
-    ticket.status = TicketStatus.PROCESSING
-    ticket.updated_at = datetime.now(timezone.utc)
-    save_ticket(ticket)
-
-    logger.info("Started processing ticket %s.", ticket.ticket_id)
-
-    try:
-        # Run CPU-bound model prediction outside the event loop.
-        prediction = await asyncio.to_thread(
-            predict_ticket,
-            ticket.subject,
-            ticket.description,
-        )
-
-        ticket.category = TicketCategory(str(prediction["category"]))
-        ticket.priority = TicketPriority(str(prediction["priority"]))
-
-        ticket.category_confidence = float(
-            prediction["category_confidence"]
-        )
-        ticket.priority_confidence = float(
-            prediction["priority_confidence"]
-        )
-
-        # Determine whether human review is required.
-        review_reasons = []
-
-        if ticket.priority == TicketPriority.CRITICAL:
-            review_reasons.append("Critical priority predicted")
-
-        if ticket.category_confidence < MIN_CONFIDENCE:
-            review_reasons.append("Low category confidence")
-
-        if ticket.priority_confidence < MIN_CONFIDENCE:
-            review_reasons.append("Low priority confidence")
-
-        if review_reasons:
-            ticket.requires_human_approval = True
-            ticket.escalation_reason = "; ".join(review_reasons)
-            ticket.status = TicketStatus.WAITING_FOR_APPROVAL
-        else:
-            ticket.requires_human_approval = False
-            ticket.escalation_reason = None
-            ticket.status = TicketStatus.PROCESSING
-
-        ticket.updated_at = datetime.now(timezone.utc)
-        save_ticket(ticket)
-
-        logger.info(
-            (
-                "Ticket %s classified: category=%s, priority=%s, "
-                "category_confidence=%.3f, priority_confidence=%.3f, "
-                "status=%s"
-            ),
-            ticket.ticket_id,
-            ticket.category.value,
-            ticket.priority.value,
-            ticket.category_confidence,
-            ticket.priority_confidence,
-            ticket.status.value,
-        )
-
-        if ticket.requires_human_approval:
-            logger.warning(
-                "Ticket %s requires human review: %s",
-                ticket.ticket_id,
-                ticket.escalation_reason,
-            )
-            return ticket
-
-        # Only tickets that do not require approval proceed to RAG.
-        passages = await retrieve_knowledge_for_ticket(ticket)
-
-        logger.info(
-            "Retrieved %d knowledge passages for ticket %s.",
-            len(passages),
-            ticket.ticket_id,
-        )
-
-        for passage in passages:
-            logger.info(
-                "Ticket %s knowledge match: source=%s section=%s score=%.3f",
-                ticket.ticket_id,
-                passage["source"],
-                passage["section"],
-                passage["score"],
-            )
-
-        ticket.updated_at = datetime.now(timezone.utc)
-        save_ticket(ticket)
-
     except Exception:
-        logger.exception(
-            "Failed to process ticket %s.",
-            ticket.ticket_id,
-        )
-
+        logger.exception("Failed to process ticket %s", ticket.ticket_id)
         ticket.status = TicketStatus.FAILED
         ticket.requires_human_approval = True
         ticket.escalation_reason = (
@@ -177,21 +104,17 @@ async def process_ticket(ticket: Ticket) -> Ticket:
         )
         ticket.updated_at = datetime.now(timezone.utc)
         save_ticket(ticket)
-
-    return ticket
+        return ticket
 
 
 async def run_ticket_worker(
-    ticket_queue: TicketQueue,
+    queue: TicketQueue,
     stop_event: asyncio.Event,
 ) -> None:
-    """Continuously process tickets from the asynchronous queue."""
-    logger.info("Ticket worker started.")
-
     while not stop_event.is_set():
         try:
             ticket = await asyncio.wait_for(
-                ticket_queue.dequeue(),
+                queue.dequeue(),
                 timeout=1.0,
             )
         except asyncio.TimeoutError:
@@ -199,14 +122,10 @@ async def run_ticket_worker(
 
         try:
             await process_ticket(ticket)
-
         except Exception:
             logger.exception(
-                "Unexpected worker error while processing ticket %s.",
+                "Worker encountered an error processing ticket %s.",
                 ticket.ticket_id,
             )
-
         finally:
-            ticket_queue.task_done()
-
-    logger.info("Ticket worker stopped.")
+            queue.task_done()
