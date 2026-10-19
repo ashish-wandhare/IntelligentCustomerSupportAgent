@@ -1,4 +1,5 @@
-﻿from datetime import datetime, timezone
+﻿
+from datetime import datetime, timezone
 from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -45,12 +46,45 @@ class Ticket(TicketCreate):
     category: TicketCategory = TicketCategory.GENERAL
     priority: TicketPriority = TicketPriority.MEDIUM
     status: TicketStatus = TicketStatus.OPEN
+
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
     updated_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
+
     resolution: str | None = None
     requires_human_approval: bool = False
     escalation_reason: str | None = None
+
+    # ML prediction confidence scores, from 0.0 to 1.0.
+    category_confidence: float | None = Field(
+        default=None, ge=0.0, le=1.0
+    )
+    priority_confidence: float | None = Field(
+        default=None, ge=0.0, le=1.0
+    )
+
+class ReviewAction(str, Enum):
+    APPROVE = "approve"
+    REJECT = "reject"
+
+
+class ReviewDecision(BaseModel):
+    """Human review decision submitted by a reviewer."""
+
+    action: ReviewAction
+    reviewer_id: str = Field(min_length=1, max_length=100)
+    comment: str | None = Field(default=None, max_length=2000)
+
+
+class ReviewResponse(BaseModel):
+    """Result of a human-review action."""
+
+    ticket_id: str
+    status: TicketStatus
+    action: ReviewAction
+    reviewer_id: str
+    comment: str | None = None
+    reviewed_at: datetime
