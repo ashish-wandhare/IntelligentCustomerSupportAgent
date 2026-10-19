@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def ticket_has_existing_classification(ticket: Ticket) -> bool:
+    """Check whether the ticket already has ML classification results."""
     return (
         ticket.category_confidence is not None
         and ticket.priority_confidence is not None
@@ -19,6 +20,7 @@ def ticket_has_existing_classification(ticket: Ticket) -> bool:
 
 
 def ticket_is_resuming_after_approval(ticket: Ticket) -> bool:
+    """Check whether an approved ticket is resuming processing."""
     return (
         ticket.status == TicketStatus.PROCESSING
         and ticket_has_existing_classification(ticket)
@@ -27,6 +29,7 @@ def ticket_is_resuming_after_approval(ticket: Ticket) -> bool:
 
 
 async def process_ticket(ticket: Ticket) -> Ticket:
+    """Process a ticket using classification, LangGraph, and RAG."""
     resuming_approved_ticket = ticket_is_resuming_after_approval(ticket)
 
     try:
@@ -47,6 +50,7 @@ async def process_ticket(ticket: Ticket) -> Ticket:
             "resume_approved": resuming_approved_ticket,
         }
 
+        # Preserve the original ML classification after human approval.
         if resuming_approved_ticket:
             graph_state.update(
                 {
@@ -61,6 +65,7 @@ async def process_ticket(ticket: Ticket) -> Ticket:
 
         result = await run_agent_graph(graph_state)
 
+        # Apply classification results for tickets processed for the first time.
         if not resuming_approved_ticket:
             from src.customer_support.schemas import (
                 TicketCategory,
@@ -71,32 +76,57 @@ async def process_ticket(ticket: Ticket) -> Ticket:
             ticket.priority = TicketPriority(result["priority"])
             ticket.category_confidence = result["category_confidence"]
             ticket.priority_confidence = result["priority_confidence"]
-            ticket.requires_human_approval = result["requires_human_approval"]
+            ticket.requires_human_approval = result[
+                "requires_human_approval"
+            ]
             ticket.escalation_reason = result.get("escalation_reason")
 
+            # Pause automated processing when human review is required.
             if ticket.requires_human_approval:
                 ticket.status = TicketStatus.WAITING_FOR_APPROVAL
                 ticket.updated_at = datetime.now(timezone.utc)
                 save_ticket(ticket)
+
                 logger.info(
                     "Ticket %s requires human approval.",
                     ticket.ticket_id,
                 )
                 return ticket
 
-        for passage in result.get("knowledge", []):
+        # Log the knowledge passages returned by the RAG retriever.
+        knowledge = result.get("knowledge", [])
+
+        for passage in knowledge:
             logger.info(
                 "Knowledge retrieved for ticket %s: %s",
                 ticket.ticket_id,
                 passage,
             )
 
+        # Mark successful automated processing as resolved.
+        ticket.status = TicketStatus.RESOLVED
+        ticket.resolution = (
+            "Automated processing completed. "
+            "Relevant knowledge articles were retrieved."
+        )
+        ticket.requires_human_approval = False
+        ticket.escalation_reason = None
         ticket.updated_at = datetime.now(timezone.utc)
         save_ticket(ticket)
+
+        logger.info(
+            "Ticket %s processing completed successfully.",
+            ticket.ticket_id,
+        )
+
         return ticket
 
     except Exception:
-        logger.exception("Failed to process ticket %s", ticket.ticket_id)
+        logger.exception(
+            "Failed to process ticket %s.",
+            ticket.ticket_id,
+        )
+
         ticket.status = TicketStatus.FAILED
         ticket.requires_human_approval = True
         ticket.escalation_reason = (
@@ -104,6 +134,7 @@ async def process_ticket(ticket: Ticket) -> Ticket:
         )
         ticket.updated_at = datetime.now(timezone.utc)
         save_ticket(ticket)
+
         return ticket
 
 
@@ -111,6 +142,7 @@ async def run_ticket_worker(
     queue: TicketQueue,
     stop_event: asyncio.Event,
 ) -> None:
+    """Continuously consume and process tickets from the queue."""
     while not stop_event.is_set():
         try:
             ticket = await asyncio.wait_for(

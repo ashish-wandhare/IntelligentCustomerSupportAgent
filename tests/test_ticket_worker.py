@@ -114,8 +114,21 @@ async def test_approved_ticket_resumes_without_reclassification(
     assert graph_state["category"] == TicketCategory.ACCOUNT.value
     assert graph_state["priority"] == TicketPriority.HIGH.value
 
-    assert result.status == TicketStatus.PROCESSING
+    assert result.status == TicketStatus.RESOLVED
+    assert result.resolution is not None
+    assert "Automated processing completed" in result.resolution
     assert result.priority == TicketPriority.HIGH
     assert result.category_confidence == 0.95
     assert result.priority_confidence == 0.90
     assert result.requires_human_approval is False
+
+    assert result.status == TicketStatus.RESOLVED
+    assert result.resolution is not None
+    assert "Automated processing completed" in result.resolution
+
+    assert result.category == TicketCategory.ACCOUNT
+    assert result.priority == TicketPriority.HIGH
+    assert result.category_confidence == 0.95
+    assert result.priority_confidence == 0.90
+    assert result.requires_human_approval is False
+    assert result.escalation_reason is None
