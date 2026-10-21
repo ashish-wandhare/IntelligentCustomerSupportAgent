@@ -131,3 +131,62 @@ async def test_approved_ticket_skips_classification():
     assert result["knowledge"] == [
         {"content": "Account access troubleshooting"}
     ]
+
+
+from src.customer_support.agent_graph import check_evidence
+
+
+def test_check_evidence_rejects_unrelated_passages():
+    state = {
+        "subject": "Delete my account",
+        "description": "I want to permanently delete my account.",
+        "knowledge": [
+            {
+                "source": "billing_support.md",
+                "section": "Payments",
+                "text": "You can update your payment method and billing details.",
+            }
+        ],
+    }
+
+    result = check_evidence(state)
+
+    assert result["knowledge"] == []
+    assert result["route"] == "human_review"
+    assert result["requires_human_approval"] is True
+
+
+def test_check_evidence_rejects_empty_knowledge():
+    state = {
+        "subject": "Application connection failure",
+        "description": "My application cannot connect to the service.",
+        "knowledge": [],
+    }
+
+    result = check_evidence(state)
+
+    assert result["knowledge"] == []
+    assert result["route"] == "human_review"
+    assert result["requires_human_approval"] is True
+
+
+def test_check_evidence_accepts_relevant_passage():
+    state = {
+        "subject": "Password reset",
+        "description": "I cannot reset my password and need account access.",
+        "knowledge": [
+            {
+                "source": "account_access.md",
+                "section": "Password Reset",
+                "text": (
+                    "To reset your password, use the password reset link "
+                    "and follow the account verification steps."
+                ),
+            }
+        ],
+    }
+
+    result = check_evidence(state)
+
+    assert len(result["knowledge"]) == 1
+    assert result["route"] == "generate_response"

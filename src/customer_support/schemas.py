@@ -55,6 +55,7 @@ class Ticket(TicketCreate):
     )
 
     resolution: str | None = None
+    customer_response: str | None = None
     requires_human_approval: bool = False
     escalation_reason: str | None = None
 
@@ -65,6 +66,7 @@ class Ticket(TicketCreate):
     priority_confidence: float | None = Field(
         default=None, ge=0.0, le=1.0
     )
+
 
 class ReviewAction(str, Enum):
     APPROVE = "approve"

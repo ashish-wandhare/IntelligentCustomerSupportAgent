@@ -5,10 +5,19 @@ from datetime import datetime, timezone
 
 from src.customer_support.agent_graph import run_agent_graph
 from src.customer_support.database import save_ticket
-from src.customer_support.schemas import Ticket, TicketStatus
+from src.customer_support.schemas import (
+    Ticket,
+    TicketCategory,
+    TicketPriority,
+    TicketStatus,
+)
 from src.customer_support.ticket_queue import TicketQueue
 
 logger = logging.getLogger(__name__)
+
+LLM_FAILURE_MESSAGE = (
+    "We could not generate a customer response automatically."
+)
 
 
 def ticket_has_existing_classification(ticket: Ticket) -> bool:
@@ -50,7 +59,7 @@ async def process_ticket(ticket: Ticket) -> Ticket:
             "resume_approved": resuming_approved_ticket,
         }
 
-        # Preserve the original ML classification after human approval.
+        # Preserve the original classification after human approval.
         if resuming_approved_ticket:
             graph_state.update(
                 {
@@ -65,13 +74,8 @@ async def process_ticket(ticket: Ticket) -> Ticket:
 
         result = await run_agent_graph(graph_state)
 
-        # Apply classification results for tickets processed for the first time.
+        # Apply classification results on first processing.
         if not resuming_approved_ticket:
-            from src.customer_support.schemas import (
-                TicketCategory,
-                TicketPriority,
-            )
-
             ticket.category = TicketCategory(result["category"])
             ticket.priority = TicketPriority(result["priority"])
             ticket.category_confidence = result["category_confidence"]
@@ -81,7 +85,7 @@ async def process_ticket(ticket: Ticket) -> Ticket:
             ]
             ticket.escalation_reason = result.get("escalation_reason")
 
-            # Pause automated processing when human review is required.
+            # Preserve the existing classification approval gate.
             if ticket.requires_human_approval:
                 ticket.status = TicketStatus.WAITING_FOR_APPROVAL
                 ticket.updated_at = datetime.now(timezone.utc)
@@ -93,7 +97,6 @@ async def process_ticket(ticket: Ticket) -> Ticket:
                 )
                 return ticket
 
-        # Log the knowledge passages returned by the RAG retriever.
         knowledge = result.get("knowledge", [])
 
         for passage in knowledge:
@@ -103,11 +106,45 @@ async def process_ticket(ticket: Ticket) -> Ticket:
                 passage,
             )
 
-        # Mark successful automated processing as resolved.
+        # Do not resolve tickets without usable knowledge.
+        if not knowledge:
+            ticket.customer_response = None
+            ticket.status = TicketStatus.WAITING_FOR_APPROVAL
+            ticket.requires_human_approval = True
+            ticket.escalation_reason = (
+                "No relevant knowledge was retrieved; "
+                "human review is required."
+            )
+            ticket.updated_at = datetime.now(timezone.utc)
+            save_ticket(ticket)
+
+            logger.warning(
+                "Ticket %s requires review because no knowledge "
+                "was retrieved.",
+                ticket.ticket_id,
+            )
+            return ticket
+
+        customer_response = result.get("customer_response")
+
+        # The response generator currently returns this fallback
+        # when the Groq API call fails. Never treat it as success.
+        if (
+            not customer_response
+            or customer_response.strip().startswith(LLM_FAILURE_MESSAGE)
+        ):
+            raise RuntimeError(
+                "Customer response generation failed; "
+                "the ticket must not be resolved."
+            )
+
+        ticket.customer_response = customer_response
+
         ticket.status = TicketStatus.RESOLVED
         ticket.resolution = (
-            "Automated processing completed. "
-            "Relevant knowledge articles were retrieved."
+            "Automated processing completed. Relevant knowledge "
+            "articles were retrieved and a customer response "
+            "was generated."
         )
         ticket.requires_human_approval = False
         ticket.escalation_reason = None

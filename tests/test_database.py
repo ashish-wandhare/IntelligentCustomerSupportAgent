@@ -84,3 +84,17 @@ def test_saving_existing_ticket_updates_processing_fields(
         "Password reset instructions provided."
     )
     assert saved["subject"] == "Unable to log in"
+
+
+def test_initialize_database_creates_customer_response_column(
+    temporary_database,
+):
+    with database.get_connection() as connection:
+        columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(tickets)"
+            ).fetchall()
+        }
+
+    assert "customer_response" in columns

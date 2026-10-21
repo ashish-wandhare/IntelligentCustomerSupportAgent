@@ -19,6 +19,21 @@ from src.customer_support.ticket_worker import (
 
 
 @pytest.fixture
+def temporary_database(tmp_path, monkeypatch):
+    """Use an isolated SQLite database for worker tests."""
+    db_path = tmp_path / "test_ticket_worker.db"
+
+    monkeypatch.setattr(
+        database,
+        "get_database_path",
+        lambda: db_path,
+    )
+
+    database.initialize_database()
+    return db_path
+
+
+@pytest.fixture
 def sample_ticket():
     return Ticket(
         ticket_id="TKT-WORKER-001",
@@ -29,7 +44,10 @@ def sample_ticket():
 
 
 @pytest.mark.asyncio
-async def test_process_ticket_routes_for_review(sample_ticket):
+async def test_process_ticket_routes_for_review(
+    sample_ticket,
+    temporary_database,
+):
     with patch(
         "src.customer_support.ticket_worker.run_agent_graph",
         new_callable=AsyncMock,
@@ -74,6 +92,7 @@ async def test_worker_consumes_queued_ticket(sample_ticket):
         finally:
             stop_event.set()
             worker_task.cancel()
+
             try:
                 await worker_task
             except asyncio.CancelledError:
@@ -85,6 +104,7 @@ async def test_worker_consumes_queued_ticket(sample_ticket):
 @pytest.mark.asyncio
 async def test_approved_ticket_resumes_without_reclassification(
     sample_ticket,
+    temporary_database,
 ):
     sample_ticket.status = TicketStatus.PROCESSING
     sample_ticket.category = TicketCategory.ACCOUNT
@@ -96,12 +116,27 @@ async def test_approved_ticket_resumes_without_reclassification(
 
     database.save_ticket(sample_ticket)
 
+    expected_response = (
+        "Thank you for contacting support about: Unable to log in.\n\n"
+        "Reset your password using the Forgot Password link."
+    )
+
     with patch(
         "src.customer_support.ticket_worker.run_agent_graph",
         new_callable=AsyncMock,
         return_value={
             "route": "continue_processing",
-            "knowledge": [],
+            "knowledge": [
+                {
+                    "text": (
+                        "Reset your password using the Forgot Password link."
+                    ),
+                    "source": "account_access.md",
+                    "section": "Password Reset",
+                    "score": 0.85,
+                }
+            ],
+            "customer_response": expected_response,
         },
     ) as mock_graph:
         result = await process_ticket(sample_ticket)
@@ -118,17 +153,14 @@ async def test_approved_ticket_resumes_without_reclassification(
     assert result.resolution is not None
     assert "Automated processing completed" in result.resolution
     assert result.priority == TicketPriority.HIGH
-    assert result.category_confidence == 0.95
-    assert result.priority_confidence == 0.90
-    assert result.requires_human_approval is False
-
-    assert result.status == TicketStatus.RESOLVED
-    assert result.resolution is not None
-    assert "Automated processing completed" in result.resolution
-
     assert result.category == TicketCategory.ACCOUNT
-    assert result.priority == TicketPriority.HIGH
     assert result.category_confidence == 0.95
     assert result.priority_confidence == 0.90
     assert result.requires_human_approval is False
     assert result.escalation_reason is None
+
+    assert result.customer_response == expected_response
+
+    saved_ticket = database.get_ticket(sample_ticket.ticket_id)
+    assert saved_ticket is not None
+    assert saved_ticket["customer_response"] == expected_response

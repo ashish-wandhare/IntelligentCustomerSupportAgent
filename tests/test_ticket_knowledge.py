@@ -1,8 +1,7 @@
+
 from unittest.mock import patch
 
-from src.customer_support.knowledge_base.ticket_knowledge import (
-    retrieve_ticket_knowledge,
-)
+import src.customer_support.knowledge_base.ticket_knowledge as ticket_knowledge
 
 
 def test_retrieves_knowledge_for_ticket():
@@ -15,12 +14,14 @@ def test_retrieves_knowledge_for_ticket():
         }
     ]
 
+    ticket_knowledge._retriever = None
+
     with patch(
         "src.customer_support.knowledge_base.ticket_knowledge.KnowledgeBaseRetriever"
     ) as mock_retriever:
         mock_retriever.return_value.search.return_value = fake_results
 
-        results = retrieve_ticket_knowledge(
+        results = ticket_knowledge.retrieve_ticket_knowledge(
             subject="Payment failed",
             description="The customer cannot complete a payment.",
             top_k=3,
@@ -34,12 +35,14 @@ def test_retrieves_knowledge_for_ticket():
 
 
 def test_retrieval_uses_default_top_k():
+    ticket_knowledge._retriever = None
+
     with patch(
         "src.customer_support.knowledge_base.ticket_knowledge.KnowledgeBaseRetriever"
     ) as mock_retriever:
         mock_retriever.return_value.search.return_value = []
 
-        results = retrieve_ticket_knowledge(
+        results = ticket_knowledge.retrieve_ticket_knowledge(
             subject="Login problem",
             description="The customer cannot sign in.",
         )
@@ -49,3 +52,8 @@ def test_retrieval_uses_default_top_k():
         query="Login problem\nThe customer cannot sign in.",
         top_k=3,
     )
+
+
+def teardown_function():
+    """Prevent cached retrievers from leaking between tests."""
+    ticket_knowledge._retriever = None

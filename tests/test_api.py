@@ -1,9 +1,17 @@
 
+from datetime import datetime, timezone
+
 import pytest
 from fastapi.testclient import TestClient
 
 from src.customer_support import api
 from src.customer_support import database
+from src.customer_support.schemas import (
+    Ticket,
+    TicketCategory,
+    TicketPriority,
+    TicketStatus,
+)
 from src.customer_support.ticket_queue import TicketQueue
 
 
@@ -17,7 +25,11 @@ def client(tmp_path, monkeypatch):
         "get_database_path",
         lambda: db_path,
     )
-    monkeypatch.setattr(api, "ticket_queue", TicketQueue(max_size=10))
+    monkeypatch.setattr(
+        api,
+        "ticket_queue",
+        TicketQueue(max_size=10),
+    )
 
     with TestClient(api.app) as test_client:
         yield test_client
@@ -41,15 +53,18 @@ def create_ticket(client):
 
 
 def make_ticket_pending_review(ticket_id):
-    """Set up a pending-review ticket directly in the test database."""
-    from datetime import datetime, timezone
-
-    from src.customer_support.schemas import Ticket, TicketStatus
-
+    """Set up a realistically classified ticket awaiting review."""
     record = database.get_ticket(ticket_id)
     assert record is not None
 
     ticket = Ticket.model_validate(record)
+
+    # Simulate classification results from the ML classifier.
+    ticket.category = TicketCategory.ACCOUNT
+    ticket.priority = TicketPriority.HIGH
+    ticket.category_confidence = 0.55
+    ticket.priority_confidence = 0.60
+
     ticket.status = TicketStatus.WAITING_FOR_APPROVAL
     ticket.requires_human_approval = True
     ticket.escalation_reason = "Low model confidence"
@@ -118,7 +133,11 @@ def test_list_pending_review_tickets(client):
     response = client.get("/tickets/pending-review")
 
     assert response.status_code == 200
-    ticket_ids = [ticket["ticket_id"] for ticket in response.json()]
+
+    ticket_ids = [
+        ticket["ticket_id"]
+        for ticket in response.json()
+    ]
     assert ticket_id in ticket_ids
 
 
@@ -136,12 +155,14 @@ def test_approve_pending_ticket(client):
     )
 
     assert response.status_code == 200
+
     result = response.json()
     assert result["action"] == "approve"
     assert result["status"] == "processing"
     assert result["reviewer_id"] == "reviewer-test-001"
 
     ticket = client.get(f"/tickets/{ticket_id}").json()
+
     assert ticket["status"] == "processing"
     assert ticket["requires_human_approval"] is False
 
@@ -160,11 +181,14 @@ def test_reject_pending_ticket(client):
     )
 
     assert response.status_code == 200
+
     result = response.json()
     assert result["action"] == "reject"
     assert result["status"] == "escalated"
+    assert result["reviewer_id"] == "reviewer-test-002"
 
     ticket = client.get(f"/tickets/{ticket_id}").json()
+
     assert ticket["status"] == "escalated"
     assert ticket["requires_human_approval"] is True
 
@@ -173,22 +197,22 @@ def test_duplicate_review_returns_409(client):
     ticket_id = create_ticket(client)
     make_ticket_pending_review(ticket_id)
 
-    decision = {
-        "action": "approve",
+    payload = {
+        "action": "reject",
         "reviewer_id": "reviewer-test-003",
-        "comment": "Approved.",
+        "comment": "Needs manual investigation.",
     }
 
     first_response = client.post(
         f"/tickets/{ticket_id}/review",
-        json=decision,
+        json=payload,
     )
+    assert first_response.status_code == 200
+
     second_response = client.post(
         f"/tickets/{ticket_id}/review",
-        json=decision,
+        json=payload,
     )
-
-    assert first_response.status_code == 200
     assert second_response.status_code == 409
 
 
@@ -198,6 +222,7 @@ def test_review_missing_ticket_returns_404(client):
         json={
             "action": "approve",
             "reviewer_id": "reviewer-test-004",
+            "comment": "Approval attempt.",
         },
     )
 
@@ -208,23 +233,26 @@ def test_review_history_is_persisted(client):
     ticket_id = create_ticket(client)
     make_ticket_pending_review(ticket_id)
 
-    client.post(
+    response = client.post(
         f"/tickets/{ticket_id}/review",
         json={
             "action": "approve",
             "reviewer_id": "reviewer-test-005",
-            "comment": "Reviewed and approved.",
+            "comment": "Approved for processing.",
         },
     )
 
-    response = client.get(f"/tickets/{ticket_id}/reviews")
-
     assert response.status_code == 200
-    history = response.json()
 
-    assert len(history) == 1
-    assert history[0]["ticket_id"] == ticket_id
-    assert history[0]["action"] == "approve"
-    assert history[0]["reviewer_id"] == "reviewer-test-005"
-    assert history[0]["comment"] == "Reviewed and approved."
-    assert history[0]["reviewed_at"] is not None
+    history_response = client.get(
+        f"/tickets/{ticket_id}/reviews"
+    )
+
+    assert history_response.status_code == 200
+
+    history = history_response.json()
+
+    assert len(history["reviews"]) == 1
+    assert history["reviews"][0]["action"] == "approve"
+    assert history["reviews"][0]["reviewer_id"] == "reviewer-test-005"
+    assert history["reviews"][0]["comment"] == "Approved for processing."

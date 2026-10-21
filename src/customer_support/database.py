@@ -1,5 +1,6 @@
 ﻿
 import sqlite3
+
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,6 +53,7 @@ def initialize_database() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 resolution TEXT,
+                customer_response TEXT,
                 requires_human_approval INTEGER NOT NULL DEFAULT 0,
                 escalation_reason TEXT,
                 category_confidence REAL,
@@ -66,6 +68,11 @@ def initialize_database() -> None:
                 "PRAGMA table_info(tickets)"
             ).fetchall()
         }
+
+        if "customer_response" not in existing_columns:
+            connection.execute(
+                "ALTER TABLE tickets ADD COLUMN customer_response TEXT"
+            )
 
         if "category_confidence" not in existing_columns:
             connection.execute(
@@ -124,18 +131,20 @@ def save_ticket(ticket: Ticket) -> None:
                 created_at,
                 updated_at,
                 resolution,
+                customer_response,
                 requires_human_approval,
                 escalation_reason,
                 category_confidence,
                 priority_confidence
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(ticket_id) DO UPDATE SET
                 category = excluded.category,
                 priority = excluded.priority,
                 status = excluded.status,
                 updated_at = excluded.updated_at,
                 resolution = excluded.resolution,
+                customer_response = excluded.customer_response,
                 requires_human_approval =
                     excluded.requires_human_approval,
                 escalation_reason = excluded.escalation_reason,
@@ -153,6 +162,7 @@ def save_ticket(ticket: Ticket) -> None:
                 ticket.created_at.isoformat(),
                 ticket.updated_at.isoformat(),
                 ticket.resolution,
+                ticket.customer_response,
                 int(ticket.requires_human_approval),
                 ticket.escalation_reason,
                 ticket.category_confidence,
@@ -170,6 +180,24 @@ def get_ticket(ticket_id: str) -> dict | None:
         ).fetchone()
 
     return dict(row) if row else None
+
+
+def get_all_tickets(limit: int = 500) -> list[dict]:
+    """Return the most recently updated tickets for monitoring."""
+    if limit < 1:
+        raise ValueError("Limit must be at least 1.")
+
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT * FROM tickets
+            ORDER BY updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    return [dict(row) for row in rows]
 
 
 def get_pending_review_tickets() -> list[dict]:

@@ -2,10 +2,10 @@
 import asyncio
 
 import pytest
-
 from unittest.mock import AsyncMock, patch
 
-from src.customer_support.schemas import Ticket
+from src.customer_support import database
+from src.customer_support.schemas import Ticket, TicketStatus
 from src.customer_support.ticket_queue import TicketQueue
 from src.customer_support.ticket_worker import (
     process_ticket,
@@ -104,7 +104,21 @@ def test_queue_blocks_enqueue_when_full(sample_ticket):
 
 
 @pytest.mark.asyncio
-async def test_process_ticket_routes_for_review(sample_ticket):
+async def test_process_ticket_routes_for_review(
+    sample_ticket,
+    tmp_path,
+    monkeypatch,
+):
+    database_path = tmp_path / "test_tickets.db"
+
+    monkeypatch.setattr(
+        database,
+        "get_database_path",
+        lambda: database_path,
+    )
+
+    database.initialize_database()
+
     with patch(
         "src.customer_support.ticket_worker.run_agent_graph",
         new_callable=AsyncMock,
@@ -121,10 +135,16 @@ async def test_process_ticket_routes_for_review(sample_ticket):
     ):
         result = await process_ticket(sample_ticket)
 
-    from src.customer_support.schemas import TicketStatus
-
     assert result.status == TicketStatus.WAITING_FOR_APPROVAL
     assert result.requires_human_approval is True
+
+    saved_ticket = database.get_ticket(sample_ticket.ticket_id)
+
+    assert saved_ticket is not None
+    assert (
+        saved_ticket["status"]
+        == TicketStatus.WAITING_FOR_APPROVAL.value
+    )
 
 
 @pytest.mark.asyncio
@@ -150,6 +170,7 @@ async def test_worker_consumes_queued_ticket(sample_ticket):
         finally:
             stop_event.set()
             worker_task.cancel()
+
             try:
                 await worker_task
             except asyncio.CancelledError:

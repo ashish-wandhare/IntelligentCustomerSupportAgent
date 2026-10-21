@@ -1,6 +1,9 @@
+
 from src.customer_support.knowledge_base.retriever import (
     KnowledgeBaseRetriever,
 )
+
+_retriever: KnowledgeBaseRetriever | None = None
 
 
 def retrieve_ticket_knowledge(
@@ -13,11 +16,14 @@ def retrieve_ticket_knowledge(
 
     Returns source, section, text, and similarity score for each result.
     """
+    global _retriever
+
     query = f"{subject.strip()}\n{description.strip()}"
 
-    retriever = KnowledgeBaseRetriever()
+    if _retriever is None:
+        _retriever = KnowledgeBaseRetriever()
 
-    return retriever.search(
+    return _retriever.search(
         query=query,
         top_k=top_k,
     )

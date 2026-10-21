@@ -59,3 +59,12 @@ def test_results_include_source_section_text_and_score(retriever):
     assert result["section"]
     assert result["text"]
     assert 0 <= result["score"] <= 1
+    
+
+def test_unrelated_query_returns_no_results(retriever):
+    results = retriever.search(
+        "What is the weather on Mars?",
+        top_k=3,
+    )
+
+    assert results == []

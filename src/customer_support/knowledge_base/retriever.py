@@ -1,4 +1,5 @@
-﻿from pathlib import Path
+﻿
+from pathlib import Path
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -45,9 +46,9 @@ class KnowledgeBaseRetriever:
         self,
         query: str,
         top_k: int = 3,
-        min_score: float = 0.0,
+        min_score: float = 0.10,
     ) -> list[dict]:
-        """Return the highest-scoring passages for a non-empty query."""
+        """Return relevant passages ranked by cosine similarity."""
         if not query or not query.strip():
             raise ValueError("query must not be empty.")
 
