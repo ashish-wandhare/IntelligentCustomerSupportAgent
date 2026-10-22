@@ -256,3 +256,6 @@ Add a license section if the repository has a selected open-source license.
 **Language:** Python  
 **Primary frameworks:** FastAPI, LangGraph, Streamlit  
 **Observability:** LangSmith
+
+## Snapshots
+<img width="1398" height="881" alt="ICSA_LangGraph_Trace_runs" src="https://github.com/user-attachments/assets/fb0fcd3c-1fc6-4fa6-acef-91f69ea3998b" />
