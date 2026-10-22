@@ -258,4 +258,23 @@ Add a license section if the repository has a selected open-source license.
 **Observability:** LangSmith
 
 ## Snapshots
-<img width="1398" height="881" alt="ICSA_LangGraph_Trace_runs" src="https://github.com/user-attachments/assets/fb0fcd3c-1fc6-4fa6-acef-91f69ea3998b" />
+<img width="1907" height="905" alt="CSA_Dashboard_1" src="https://github.com/user-attachments/assets/25cf9a79-3833-45f0-98a3-b95979066b20" />
+<img width="1892" height="897" alt="CSA_Dashboard_2" src="https://github.com/user-attachments/assets/2ed91858-b239-4d3b-aa50-0086d8af804f" />
+<img width="1882" height="937" alt="CSA_Dashboard_3" src="https://github.com/user-attachments/assets/f0e12d39-ee0a-46e5-ae6a-24d5e0fd983a" />
+<img width="1832" height="860" alt="ICSA_API_1" src="https://github.com/user-attachments/assets/9b688719-676b-44e0-8771-6dbba8cafb35" />
+<img width="1860" height="938" alt="ICSA_API_2" src="https://github.com/user-attachments/assets/f158ec5f-7157-482a-b088-67d5295e617f" />
+<img width="1560" height="897" alt="ICSA_LangGraph_Trace_1" src="https://github.com/user-attachments/assets/2a7efaec-29e1-4076-9f03-e78ae76ae1d4" />
+<img width="1398" height="881" alt="ICSA_LangGraph_Trace_runs" src="https://github.com/user-attachments/assets/45a2d3a2-f997-48c5-9782-4fb582508a6f" />
+<img width="1603" height="477" alt="ICSA_LangGraph_Trace_oerview" src="https://github.com/user-attachments/assets/67b80362-8ea9-41ff-9ca1-d9d1dc811264" />
+
+
+
+
+
+
+
+
+
+
+
+
