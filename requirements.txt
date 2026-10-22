@@ -13,3 +13,4 @@ langgraph>=1.2,<2.0
 streamlit
 streamlit-autorefresh
 plotly
+langchain-groq
